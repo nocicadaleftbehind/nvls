@@ -14,18 +14,18 @@ except ModuleNotFoundError as e:
     print("pynvml needs to be installed")
     exit(0)
 
-# api version independent function call, see set_api_version()
-getProcessesFunction = lambda x: None
+# api version independent function call, see check_api_version()
+getProcessesFunction = lambda x: x
 
 COLUMN_PADDING = 4
 
 
 def init():
     pynvml.nvmlInit()
-    set_api_version()
+    check_api_version()
 
 
-def set_api_version():
+def check_api_version():
     # there are multiple pynvml version, we need to call the correct version based on our installed pynvml version
     global getProcessesFunction
 
@@ -45,7 +45,9 @@ def main(args):
     init()
 
     deviceCount = pynvml.nvmlDeviceGetCount()
+
     print_system_info(deviceCount)
+
     processes = get_all_processes(deviceCount)
 
     if args.usersum:
@@ -57,18 +59,21 @@ def main(args):
     if args.user:
         processes = filter_processes_by_user(processes, args.user)
 
-    print_processes(processes)
+    short_numbers = args.human_numbers
+    print_processes(processes, short_numbers)
 
 
 def get_all_processes(device_count):
     all_processes = []
     for deviceId in range(device_count):
         handle = pynvml.nvmlDeviceGetHandleByIndex(deviceId)
-        processes_by_pid = sorted(getProcessesFunction(handle), key=lambda x: x.pid)
-        for processCount, process in enumerate(processes_by_pid):
+        device_processes = getProcessesFunction(handle)
+        processes_by_pid = sorted(device_processes, key=lambda x: x.pid)
+        for process in processes_by_pid:
             user = "UNKNOWN"
             process_name = "UNKNOWN"
             created_time = "UNKNOWN"
+
             try:
                 ps_util_process = psutil.Process(process.pid)
                 user = ps_util_process.username()
@@ -87,6 +92,7 @@ def get_all_processes(device_count):
                 "GPU-Mem": process.usedGpuMemory,
                 "Created": created_time
             })
+
     return all_processes
 
 
@@ -142,9 +148,25 @@ def print_system_info(deviceCount):
     print()
 
 
-def print_processes(all_processes):
+def size_format(num):
+    for unit in ("", "KB", "MB", "GB"):
+        if abs(num) < 1024.0:
+            return f"{num:3.1f}{unit}"
+        num /= 1024.0
+    return num
+
+
+def print_processes(all_processes, short_numbers):
     columns = list(all_processes[0].keys())
     column_sizes = []
+
+    #if short_numbers:
+    if True:
+        for process in all_processes:
+            for column in columns:
+                if isinstance(process[column], int) and column not in ["PID", "Device"]:
+                    process[column] = size_format(process[column])
+
     for column in columns:
         max_len = max([len(str(process[column])) for process in all_processes] + [len(column)])
         column_sizes.append(max_len + COLUMN_PADDING)
@@ -162,10 +184,18 @@ def print_processes(all_processes):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog='gputop',
-                                     description='top-like information for GPU processes')
-    parser.add_argument("-u", "--user", type=str, nargs="*")
-    parser.add_argument("--usersum", action='store_true')
-    parser.add_argument("--devicesum", action='store_true')
+    parser = argparse.ArgumentParser(prog='nvls',
+                                     description='ls-like information for Nvidia GPU processes')
+    parser.add_argument("-u", "--user",
+                        type=str,
+                        nargs="*")
+    parser.add_argument("-s",
+                        dest="human_numbers",
+                        action='store_true',
+                        help="Human-readable numbers (9k instead of 9001)")
+    parser.add_argument("--usersum",
+                        action='store_true')
+    parser.add_argument("--devicesum",
+                        action='store_true')
     args = parser.parse_args()
     main(args)

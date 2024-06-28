@@ -1,9 +1,9 @@
-# gputop
-gputop prints information for GPU processes in a similar to `top`.
+# nvls
+nvls prints information for GPU processes in a similar to `ls`.
 
 # Usage
 
-`python gputop.py` lists all processes currently running on a GPU
+`python nvls.py` lists all processes currently running on a GPU
 
 `--user USER` filters the list above by username
 
