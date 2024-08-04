@@ -21,7 +21,15 @@ COLUMN_PADDING = 4
 
 
 def init():
-    pynvml.nvmlInit()
+    try:
+        pynvml.nvmlInit()
+    except pynvml.nvml.NVMLError_LibRmVersionMismatch as e:
+        print("Version mismatch, please reload kernel module or restart")
+        exit(0)
+    except Exception as e:
+        print("Error while initializing nvml")
+        print(e)
+        exit(0)
     check_api_version()
 
 
@@ -46,7 +54,9 @@ def main(args):
 
     deviceCount = pynvml.nvmlDeviceGetCount()
 
-    print_system_info(deviceCount)
+    if deviceCount == 0:
+        print("No CUDA capable GPU found")
+        return
 
     processes = get_all_processes(deviceCount)
 
@@ -58,6 +68,9 @@ def main(args):
 
     if args.user:
         processes = filter_processes_by_user(processes, args.user)
+
+    if args.device:
+        processes = filter_processes_by_device(processes, args.device)
 
     short_numbers = args.human_numbers
     print_processes(processes, short_numbers)
@@ -81,7 +94,7 @@ def get_all_processes(device_count):
                 created_time_ts = ps_util_process.create_time()
                 created_time = datetime.datetime.fromtimestamp(created_time_ts).strftime("%Y-%m-%d %H:%M:%S")
             except psutil.AccessDenied as e:
-                # looking up info on other processes as non-root is forbidden
+                # looking up info on other processes as non-root is forbidden, using the default values instead
                 pass
 
             all_processes.append({
@@ -98,7 +111,11 @@ def get_all_processes(device_count):
 
 def filter_processes_by_user(all_processes, users):
     pattern = ".*(" + "|".join(users) + ").*"
-    return [process for process in all_processes if re.match(pattern, process["Username"], re.IGNORECASE)]
+    return [process for process in all_processes if re.match(pattern, process["User"], re.IGNORECASE)]
+
+
+def filter_processes_by_device(all_processes, devices):
+    return [process for process in all_processes if process["Device"] in devices]
 
 
 def sum_processes_by_users(processes):
@@ -137,17 +154,6 @@ def sum_processes_by_device(processes):
     return process_summary
 
 
-def print_system_info(deviceCount):
-    print(f"Cuda version: {pynvml.nvmlSystemGetCudaDriverVersion_v2()}")
-    print(f"Driver version: {pynvml.nvmlSystemGetDriverVersion()}")
-
-    for deviceId in range(deviceCount):
-        handle = pynvml.nvmlDeviceGetHandleByIndex(deviceId)
-        print(f"Device {deviceId}: {pynvml.nvmlDeviceGetName(handle)}")
-
-    print()
-
-
 def size_format(num):
     for unit in ("", "KB", "MB", "GB"):
         if abs(num) < 1024.0:
@@ -157,11 +163,14 @@ def size_format(num):
 
 
 def print_processes(all_processes, short_numbers):
+    if len(all_processes) == 0:
+        print("No processes found")
+        return
+
     columns = list(all_processes[0].keys())
     column_sizes = []
 
-    #if short_numbers:
-    if True:
+    if short_numbers:
         for process in all_processes:
             for column in columns:
                 if isinstance(process[column], int) and column not in ["PID", "Device"]:
@@ -189,13 +198,16 @@ if __name__ == "__main__":
     parser.add_argument("-u", "--user",
                         type=str,
                         nargs="*")
+    parser.add_argument("-d", "--device",
+                        type=int,
+                        nargs="*")
     parser.add_argument("-s",
                         dest="human_numbers",
                         action='store_true',
-                        help="Human-readable numbers (9k instead of 9001)")
+                        help="Human-readable numbers (e.g. 9k instead of 9001)")
     parser.add_argument("--usersum",
                         action='store_true')
     parser.add_argument("--devicesum",
                         action='store_true')
-    args = parser.parse_args()
+    args = parser.parse_args(["--usersum"])
     main(args)
