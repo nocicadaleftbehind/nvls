@@ -2,8 +2,10 @@
 
 import argparse
 import datetime
+import logging
 import re
 from collections import defaultdict
+from typing import List
 
 import psutil
 from packaging.version import Version
@@ -11,12 +13,10 @@ from packaging.version import Version
 try:
     import pynvml
 except ModuleNotFoundError as e:
-    print("pynvml needs to be installed")
-    exit(0)
+    logging.error("pynvml needs to be installed")
+    exit(-1)
 
 # api version independent function call, see check_api_version()
-getProcessesFunction = lambda x: x
-
 COLUMN_PADDING = 4
 
 
@@ -24,46 +24,30 @@ def init():
     try:
         pynvml.nvmlInit()
     except pynvml.nvml.NVMLError_LibRmVersionMismatch as e:
-        print("Version mismatch, please reload kernel module or restart")
-        exit(0)
+        logging.fatal("Version mismatch, please reload kernel module or restart")
+        exit(-1)
     except Exception as e:
-        print("Error while initializing nvml")
-        print(e)
-        exit(0)
+        logging.fatal("Error while initializing nvml", e)
+        exit(-1)
     check_api_version()
 
 
 def check_api_version():
-    # there are multiple pynvml version, we need to call the correct version based on our installed pynvml version
-    global getProcessesFunction
-
     pynvmlversion = Version(pynvml.__version__)
-    if pynvmlversion >= Version("11.5.0"):
-        api_version = "v3"
-    else:
-        api_version = "v2"
-
-    if api_version == "v2":
-        getProcessesFunction = pynvml.nvmlDeviceGetComputeRunningProcesses_v2
-    if api_version == "v3":
-        getProcessesFunction = pynvml.nvmlDeviceGetComputeRunningProcesses_v3
+    if pynvmlversion <= Version("11.0.0"):
+        logging.error(f"Old, unsupported version of pynvml {pynvmlversion} installed, please upgrade.")
 
 
 def main(args):
     init()
 
-    deviceCount = pynvml.nvmlDeviceGetCount()
-
-    if deviceCount == 0:
-        print("No CUDA capable GPU found")
-        return
-
-    processes = get_all_processes(deviceCount)
+    processes = get_all_processes()
 
     if args.usersum:
         processes = sum_processes_by_users(processes)
 
-    if args.devicesum:
+    # mutually exclusive with usersum, usersum has priority
+    if args.devicesum and not args.usersum:
         processes = sum_processes_by_device(processes)
 
     if args.user:
@@ -76,23 +60,28 @@ def main(args):
     print_processes(processes, short_numbers)
 
 
-def get_all_processes(device_count):
+def get_all_processes() -> List:
+    device_count = pynvml.nvmlDeviceGetCount()
+    if device_count == 0:
+        logging.error("No CUDA capable GPU found")
+        return []
+
     all_processes = []
     for deviceId in range(device_count):
         handle = pynvml.nvmlDeviceGetHandleByIndex(deviceId)
-        device_processes = getProcessesFunction(handle)
+        device_processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
         processes_by_pid = sorted(device_processes, key=lambda x: x.pid)
         for process in processes_by_pid:
-            user = "UNKNOWN"
             process_name = "UNKNOWN"
             created_time = "UNKNOWN"
+            user = "UNKNOWN"
 
             try:
                 ps_util_process = psutil.Process(process.pid)
-                user = ps_util_process.username()
                 process_name = ps_util_process.exe()
                 created_time_ts = ps_util_process.create_time()
                 created_time = datetime.datetime.fromtimestamp(created_time_ts).strftime("%Y-%m-%d %H:%M:%S")
+                user = ps_util_process.username()
             except psutil.AccessDenied as e:
                 # looking up info on other processes as non-root is forbidden, using the default values instead
                 pass
@@ -110,8 +99,12 @@ def get_all_processes(device_count):
 
 
 def filter_processes_by_user(all_processes, users):
-    pattern = ".*(" + "|".join(users) + ").*"
-    return [process for process in all_processes if re.match(pattern, process["User"], re.IGNORECASE)]
+    processes = []
+    for user in users:
+        pattern = ".*(" + user + ").*"
+        filtered_processs = [process for process in all_processes if re.match(pattern, process["User"], re.IGNORECASE)]
+        processes += filtered_processs
+    return processes
 
 
 def filter_processes_by_device(all_processes, devices):
@@ -173,7 +166,7 @@ def print_processes(all_processes, short_numbers):
     if short_numbers:
         for process in all_processes:
             for column in columns:
-                if isinstance(process[column], int) and column not in ["PID", "Device"]:
+                if isinstance(process[column], int) and column not in ["PID", "Device", "NumProcesses"]:
                     process[column] = size_format(process[column])
 
     for column in columns:
@@ -194,20 +187,32 @@ def print_processes(all_processes, short_numbers):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog='nvls',
-                                     description='ls-like information for Nvidia GPU processes')
-    parser.add_argument("-u", "--user",
-                        type=str,
-                        nargs="*")
+                                     description='ls-like information for Nvidia GPU processes',
+                                     add_help=False)
+    parser.add_argument("--help",
+                        action="store_true")
+    parser.add_argument("-h",
+                        action='store_true',
+                        dest="human_numbers",
+                        help="Human-readable numbers (e.g. 9k instead of 9001)")
     parser.add_argument("-d", "--device",
                         type=int,
-                        nargs="*")
-    parser.add_argument("-s",
-                        dest="human_numbers",
-                        action='store_true',
-                        help="Human-readable numbers (e.g. 9k instead of 9001)")
+                        action="append",
+                        help="Filter processes by device ID")
+    parser.add_argument("-u", "--user",
+                        type=str,
+                        action="append",
+                        help="Filter processes by username or user id")
     parser.add_argument("--usersum",
-                        action='store_true')
+                        action='store_true',
+                        help="Sum up resources for each user")
     parser.add_argument("--devicesum",
-                        action='store_true')
-    args = parser.parse_args(["--usersum"])
+                        action='store_true',
+                        help="Sum up resources for each device")
+    args = parser.parse_args()
+
+    if args.help:
+        parser.print_help()
+        exit(0)
+
     main(args)
